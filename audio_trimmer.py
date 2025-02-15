@@ -11,12 +11,14 @@ class AudioTrimmer:
     def __init__(self, root):
         self.root = root
         self.root.title("Audio Trimmer")
-        self.root.geometry("900x750")
+        self.root.geometry("1000x800")  # Increased height for better spacing
 
         self.audio = None
         self.sample_rate = 44100
         self.audio_duration = 0
-        self.time_unit = "seconds"  # Default unit
+        self.time_unit = "seconds"
+        self.dragging = None  # Tracks if user is dragging start or end line
+        self.updating_sliders = False
 
         # File Selection
         tk.Label(root, text="Select Audio File:").pack(pady=5)
@@ -37,29 +39,27 @@ class AudioTrimmer:
         self.end_var = tk.DoubleVar()
 
         tk.Label(root, text="Select Start Time:").pack()
-        self.start_slider = tk.Scale(root, from_=0, to=100, orient="horizontal", length=500, variable=self.start_var, command=self.update_waveform, resolution=0.001)
+        self.start_slider = tk.Scale(root, from_=0, to=100, orient="horizontal", length=500, variable=self.start_var, resolution=0.001, command=self.slider_moved)
         self.start_slider.pack()
 
         tk.Label(root, text="Select End Time:").pack()
-        self.end_slider = tk.Scale(root, from_=0, to=100, orient="horizontal", length=500, variable=self.end_var, command=self.update_waveform, resolution=0.001)
+        self.end_slider = tk.Scale(root, from_=0, to=100, orient="horizontal", length=500, variable=self.end_var, resolution=0.001, command=self.slider_moved)
         self.end_slider.pack()
 
         # Trim Button
         tk.Button(root, text="Trim Audio", command=self.trim_audio, bg="green", fg="white").pack(pady=10)
 
-        # Waveform and Frequency Spectrum Display
-        self.figure, (self.ax_waveform, self.ax_spectrum) = plt.subplots(2, 1, figsize=(8, 5))
-
-        self.ax_waveform.set_title("Audio Waveform")
-        self.ax_waveform.set_xlabel("Time (seconds)")
-        self.ax_waveform.set_ylabel("Amplitude")
-
-        self.ax_spectrum.set_title("Frequency Spectrum")
-        self.ax_spectrum.set_xlabel("Frequency (Hz)")
-        self.ax_spectrum.set_ylabel("Magnitude")
+        # Adjusted Figure Size & Spacing
+        self.figure, (self.ax_waveform, self.ax_spectrum) = plt.subplots(2, 1, figsize=(10, 6), gridspec_kw={'height_ratios': [2, 1]})  # More space for waveform
+        self.figure.subplots_adjust(hspace=0.4)  # Increase vertical spacing between plots
 
         self.canvas = FigureCanvasTkAgg(self.figure, master=root)
-        self.canvas.get_tk_widget().pack()
+        self.canvas.get_tk_widget().pack(pady=10)
+
+        # Connect waveform click & drag events
+        self.canvas.mpl_connect("button_press_event", self.on_press)
+        self.canvas.mpl_connect("motion_notify_event", self.on_drag)
+        self.canvas.mpl_connect("button_release_event", self.on_release)
 
     def select_file(self):
         """Open file dialog to select an audio file."""
@@ -75,81 +75,96 @@ class AudioTrimmer:
         self.sample_rate = self.audio.frame_rate
         self.audio_duration = len(self.audio) / 1000  # Convert to seconds
 
-        # Update slider range
         self.update_unit()
 
-        # Display waveform and frequency spectrum
-        self.update_waveform(None)
-
     def update_unit(self):
-        """Update the slider scale based on the selected time unit (seconds or milliseconds)."""
+        """Update slider scale based on seconds or milliseconds."""
         unit = self.unit_var.get()
-        if unit == "seconds":
-            max_value = self.audio_duration
-            resolution = 0.001  # Allows sub-second precision
-        else:  # milliseconds
-            max_value = self.audio_duration * 1000
-            resolution = 1  # 1ms resolution
+        max_value = self.audio_duration if unit == "seconds" else self.audio_duration * 1000
+        resolution = 0.001 if unit == "seconds" else 1  # Millisecond precision
 
         self.start_slider.config(from_=0, to=max_value, resolution=resolution)
         self.end_slider.config(from_=0, to=max_value, resolution=resolution)
 
-        # Reset slider values to max range
-        self.start_slider.set(0)
-        self.end_slider.set(max_value)
+        self.start_var.set(0)
+        self.end_var.set(max_value)
 
         self.update_waveform(None)
 
     def update_waveform(self, event):
-        """Update the waveform visualization based on the selected trim points."""
+        """Update waveform visualization."""
         if self.audio is None:
             return
 
-        unit = self.unit_var.get()
-        start_time = self.start_var.get() if unit == "seconds" else self.start_var.get() / 1000
-        end_time = self.end_var.get() if unit == "seconds" else self.end_var.get() / 1000
-
-        start_ms = int(start_time * 1000)
-        end_ms = int(end_time * 1000)
+        start_ms = int(self.start_var.get() * 1000)
+        end_ms = int(self.end_var.get() * 1000)
 
         trimmed_audio = self.audio[start_ms:end_ms]
 
-        # Convert audio to numpy array and normalize it
+        # Convert to numpy & normalize
         samples = np.array(trimmed_audio.get_array_of_samples(), dtype=np.float32)
-        samples = samples / np.max(np.abs(samples)) if len(samples) > 0 else samples  # Normalize
+        samples = samples / np.max(np.abs(samples)) if len(samples) > 0 else samples
 
-        # Generate time axis for waveform
-        time_axis = np.linspace(start_time, end_time, num=len(samples))
+        time_axis = np.linspace(self.start_var.get(), self.end_var.get(), num=len(samples))
 
-        # Display trimmed waveform
         self.ax_waveform.clear()
-        self.ax_waveform.plot(time_axis, samples, color='blue')
+        self.ax_waveform.plot(time_axis, samples, color="blue")
+        self.ax_waveform.axvline(self.start_var.get(), color="red", linestyle="--", label="Start")
+        self.ax_waveform.axvline(self.end_var.get(), color="green", linestyle="--", label="End")
         self.ax_waveform.set_title("Trimmed Audio Waveform")
-        self.ax_waveform.set_xlabel(f"Time ({unit})")
-        self.ax_waveform.set_ylabel("Amplitude")
+        self.ax_waveform.legend()
 
-        # Update frequency spectrum
+        # Frequency spectrum
         if len(samples) > 0:
             fft_data = np.abs(fft(samples))[:len(samples) // 2]
             freqs = np.fft.fftfreq(len(samples), d=1 / self.sample_rate)[:len(samples) // 2]
 
             self.ax_spectrum.clear()
-            self.ax_spectrum.plot(freqs, fft_data, color='red')
+            self.ax_spectrum.plot(freqs, fft_data, color="red")
             self.ax_spectrum.set_title("Frequency Spectrum")
-            self.ax_spectrum.set_xlabel("Frequency (Hz)")
-            self.ax_spectrum.set_ylabel("Magnitude")
 
         self.canvas.draw()
 
+    def slider_moved(self, event):
+        """Handles slider changes while preventing infinite updates."""
+        if self.updating_sliders:
+            return
+        self.updating_sliders = True
+        self.update_waveform(None)
+        self.updating_sliders = False
+
+    def on_press(self, event):
+        """Start dragging selection on waveform."""
+        if self.audio is None or event.xdata is None:
+            return
+        if abs(event.xdata - self.start_var.get()) < abs(event.xdata - self.end_var.get()):
+            self.dragging = "start"
+            self.start_var.set(event.xdata)
+        else:
+            self.dragging = "end"
+            self.end_var.set(event.xdata)
+
+    def on_drag(self, event):
+        """Drag selection across waveform."""
+        if self.dragging and event.xdata:
+            if self.dragging == "start":
+                self.start_var.set(event.xdata)
+            elif self.dragging == "end":
+                self.end_var.set(event.xdata)
+            self.update_waveform(None)
+
+    def on_release(self, event):
+        """Release drag selection on waveform."""
+        self.dragging = None
+
     def trim_audio(self):
-        """Trim the audio based on slider values and save the output."""
+        """Trim the audio based on selection and save."""
         if self.audio is None:
             messagebox.showerror("Error", "No audio file selected.")
             return
 
-        unit = self.unit_var.get()
-        start_ms = int(self.start_var.get() * 1000 if unit == "seconds" else self.start_var.get())
-        end_ms = int(self.end_var.get() * 1000 if unit == "seconds" else self.end_var.get())
+        start_ms = int(self.start_var.get() * 1000)
+        end_ms = int(self.end_var.get() * 1000)
 
         if start_ms >= end_ms:
             messagebox.showerror("Error", "End time must be greater than start time.")
@@ -157,18 +172,12 @@ class AudioTrimmer:
 
         trimmed_audio = self.audio[start_ms:end_ms]
 
-        # Ask for save location
-        output_path = filedialog.asksaveasfilename(
-            defaultextension=".mp3",
-            filetypes=[("MP3 Files", "*.mp3"), ("WAV Files", "*.wav"), ("OGG Files", "*.ogg")]
-        )
-        if not output_path:
-            return
+        output_path = filedialog.asksaveasfilename(defaultextension=".mp3",
+            filetypes=[("MP3 Files", "*.mp3"), ("WAV Files", "*.wav"), ("OGG Files", "*.ogg")])
+        if output_path:
+            trimmed_audio.export(output_path, format=output_path.split(".")[-1])
+            messagebox.showinfo("Success", f"Trimmed audio saved at:\n{output_path}")
 
-        trimmed_audio.export(output_path, format=output_path.split('.')[-1])
-        messagebox.showinfo("Success", f"Trimmed audio saved as:\n{output_path}")
-
-# Run the GUI
 root = tk.Tk()
 app = AudioTrimmer(root)
 root.mainloop()
